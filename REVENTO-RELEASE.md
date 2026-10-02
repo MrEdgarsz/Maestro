@@ -44,8 +44,8 @@ python3 maestro-cli/src/test/scripts/test_batch.py "$DIST_DIR/maestro/bin/maestr
 ```
 
 The browser gate must use Chrome for Testing `147.0.7727.117`, from the pin
-in `/Users/edgar/dev/topo-system/scripts/maestro/lib/browser.sh`. Chrome 154
-passed the previous run but does not validate this release's supported browser
-version. Set `SE_BROWSER_PATH` to the pinned executable (and, when needed,
+in `scripts/maestro/lib/browser.sh` in the Revento repository. Chrome 154 passed
+the previous run but does not validate this release's supported browser version.
+Set `SE_BROWSER_PATH` to the pinned executable (and, when needed,
 `SE_DRIVER_PATH` to its matching ChromeDriver) so the browser test does not use
 an ambient browser installation.
