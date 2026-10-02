@@ -72,6 +72,19 @@ class FlutterWebSemanticsIdentifierTest {
     }
 
     @Test
+    fun `content description traverses open shadow roots`() {
+        Context.newBuilder("js").build().use { context ->
+            context.eval("js", shadowDomScript())
+            context.eval("js", webScript)
+            val value = context.eval(
+                "js",
+                "maestro.getContentDescription().children[0].children[0].attributes['resource-id']",
+            )
+            assertThat(value.asString()).isEqualTo("shadow-submit")
+        }
+    }
+
+    @Test
     fun `a clobbered id property falls back to the id attribute`() {
         // A form control named "id" clobbers form.id into a live <input>, so node.id is an element rather
         // than a string. resource-id must recover the developer-set id from the attribute instead.
@@ -170,6 +183,32 @@ class FlutterWebSemanticsIdentifierTest {
           querySelectorAll() { return []; },
         };
 
+        globalThis.maestro = {};
+    """.trimIndent()
+
+    private fun shadowDomScript(): String = """
+        globalThis.Node = { TEXT_NODE: 3 };
+        globalThis.window = globalThis;
+        globalThis.innerWidth = 1024;
+        globalThis.innerHeight = 768;
+        const button = {
+          tagName: 'button', id: 'shadow-submit', attributes: {}, childNodes: [], children: [],
+          selected: false, parentElement: null,
+          getBoundingClientRect() { return { x: 0, y: 0, width: 100, height: 20 }; },
+        };
+        const host = {
+          tagName: 'custom-element', id: '', attributes: {}, childNodes: [], children: [],
+          shadowRoot: { children: [button] }, selected: false, parentElement: null,
+          getBoundingClientRect() { return { x: 0, y: 0, width: 100, height: 20 }; },
+        };
+        const body = {
+          tagName: 'body', id: '', attributes: {}, childNodes: [], children: [host],
+          selected: false, parentElement: null,
+          getBoundingClientRect() { return { x: 0, y: 0, width: 1024, height: 768 }; },
+        };
+        button.parentElement = host;
+        host.parentElement = body;
+        globalThis.document = { body, readyState: 'complete', querySelectorAll() { return []; } };
         globalThis.maestro = {};
     """.trimIndent()
 

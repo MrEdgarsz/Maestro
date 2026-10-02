@@ -47,10 +47,14 @@ import xcuitest.installer.LocalXCTestInstaller
 import xcuitest.installer.LocalXCTestInstaller.*
 import java.nio.file.Paths
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 import kotlin.io.path.pathString
+
+// The resident command must stop if cleanup cannot prove the previous browser closed.
+class SessionCleanupException(cause: Throwable) : RuntimeException("Browser session cleanup failed", cause)
 
 object MaestroSessionManager {
     private const val defaultHost = "localhost"
@@ -74,6 +78,7 @@ object MaestroSessionManager {
         reinstallDriver: Boolean = true,
         deviceIndex: Int? = null,
         executionPlan: WorkspaceExecutionPlanner.ExecutionPlan? = null,
+        closeOnCompletion: Boolean = false,
         block: (MaestroSession) -> T,
     ): T {
         val selectedDevice = selectDevice(
@@ -85,6 +90,35 @@ object MaestroSessionManager {
             platform = if(!platform.isNullOrEmpty()) Platform.fromString(platform) else null,
             deviceIndex = deviceIndex,
         )
+        if (closeOnCompletion) {
+            require(selectedDevice.platform == Platform.WEB) { "Isolated sessions require web" }
+            val session = try {
+                MaestroSession(pickWebDevice(isStudio, isHeadless, screenSize), null)
+            } catch (e: Exception) {
+                throw SessionCleanupException(e)
+            }
+            val closed = AtomicBoolean(false)
+            fun closeSession() {
+                if (closed.compareAndSet(false, true)) {
+                    try {
+                        session.close()
+                    } catch (e: Exception) {
+                        throw SessionCleanupException(e)
+                    }
+                }
+            }
+            val hook = thread(start = false) { closeSession() }
+            Runtime.getRuntime().addShutdownHook(hook)
+            try {
+                return block(session)
+            } finally {
+                try {
+                    closeSession()
+                } finally {
+                    Runtime.getRuntime().removeShutdownHook(hook)
+                }
+            }
+        }
         val sessionId = UUID.randomUUID().toString()
         val effectiveDeviceId = selectedDevice.device?.instanceId
             ?: selectedDevice.deviceId

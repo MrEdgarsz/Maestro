@@ -121,8 +121,12 @@
           return null;
       }
 
+      const traversableChildren = [
+        ...(node.shadowRoot?.children || []),
+        ...(node.children || []),
+      ]
       const children = includeChildren
-        ? [...node.children || []].map(child => traverse(child, true, iframeOffsetX, iframeOffsetY)).filter(el => !!el)
+        ? traversableChildren.map(child => traverse(child, true, iframeOffsetX, iframeOffsetY)).filter(el => !!el)
         : []
 
       const attributes = {

@@ -40,6 +40,8 @@ import maestro.cli.command.RecordCommand
 import maestro.cli.command.StartDeviceCommand
 import maestro.cli.command.StudioCommand
 import maestro.cli.command.TestCommand
+import maestro.cli.command.TestBatchCommand
+import maestro.cli.command.claimTestBatchStdout
 import maestro.cli.insights.TestAnalysisManager
 import maestro.cli.mcp.claimMcpStdout
 import maestro.cli.update.Updates
@@ -59,6 +61,7 @@ import kotlin.system.exitProcess
     name = "maestro",
     subcommands = [
         TestCommand::class,
+        TestBatchCommand::class,
         CloudCommand::class,
         RecordCommand::class,
         PrintHierarchyCommand::class,
@@ -123,6 +126,7 @@ fun main(args: Array<String>) {
     // kotlin-logging's first-load message will otherwise land on the MCP JSON-RPC
     // channel and break the handshake for strict clients like Claude Desktop.
     if (args.firstOrNull() == "mcp") claimMcpStdout()
+    if (args.firstOrNull() == "test-batch") claimTestBatchStdout()
 
     // Establish a consistent logging baseline for every command before any init
     // logging fires. Without this, commands that don't call TestDebugReporter.install()

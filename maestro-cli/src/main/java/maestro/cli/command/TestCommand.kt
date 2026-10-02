@@ -84,6 +84,9 @@ import maestro.device.Platform
 )
 class TestCommand : Callable<Int> {
 
+    // Set only by test-batch; each request constructs a new command instance.
+    internal var batchMode: Boolean = false
+
     @CommandLine.Mixin
     var disableANSIMixin: DisableAnsiMixin? = null
 
@@ -247,10 +250,24 @@ class TestCommand : Callable<Int> {
     }
   
     override fun call(): Int {
+        if (batchMode) {
+            if (continuous || shardSplit != null || shardAll != null || legacyShardCount != null || analyze) {
+                throw CliError("test-batch does not support continuous mode, sharding, or analysis")
+            }
+            if (platform != null && !platform.equals("web", ignoreCase = true)) {
+                throw CliError("test-batch supports only the web platform")
+            }
+            if (flowFiles.size != 1 || !flowFiles.first().isAbsolute || !flowFiles.first().isFile) {
+                throw CliError("test-batch requires one absolute flow file path per request")
+            }
+            platform = "web"
+            headless = true
+        }
         TestDebugReporter.install(
             debugOutputPathAsString = debugOutput,
             flattenDebugOutput = flattenDebugOutput,
             printToConsole = parent?.verbose == true,
+            uniqueSession = batchMode,
         )
 
         if (shardSplit != null && shardAll != null) {
@@ -280,6 +297,11 @@ class TestCommand : Callable<Int> {
             )
         } catch (e: ValidationError) {
             throw CliError(e.message)
+        }
+
+        if (batchMode && (!allFlowsAreWebFlow(executionPlan) ||
+                executionPlan.flowsToRun.size + executionPlan.sequence.flows.size != 1)) {
+            throw CliError("test-batch requires exactly one web flow per request")
         }
 
         val resolvedTestOutputDir = resolveTestOutputDir(executionPlan)
@@ -484,7 +506,8 @@ class TestCommand : Callable<Int> {
             isHeadless = headless,
             screenSize = screenSize,
             reinstallDriver = reinstallDriver,
-            executionPlan = executionPlan
+            executionPlan = executionPlan,
+            closeOnCompletion = batchMode,
         ) { session ->
             val maestro = session.maestro
             val device = session.device

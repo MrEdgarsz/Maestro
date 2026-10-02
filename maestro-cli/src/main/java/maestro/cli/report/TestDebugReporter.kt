@@ -147,10 +147,15 @@ object TestDebugReporter {
      * Calls to this method should be done as soon as possible, to make all
      * loggers use our custom configuration rather than the defaults.
      */
-    fun install(debugOutputPathAsString: String? = null, flattenDebugOutput: Boolean = false, printToConsole: Boolean) {
+    fun install(debugOutputPathAsString: String? = null, flattenDebugOutput: Boolean = false, printToConsole: Boolean, uniqueSession: Boolean = false) {
+        // A resident CLI can install a reporter more than once. Do not reuse the
+        // previous request's resolved directory or test-output override.
+        this.debugOutputPath = null
+        this.testOutputDir = null
         this.debugOutputPathAsString = debugOutputPathAsString
         this.flattenDebugOutput = flattenDebugOutput
-        this.sessionFolderName = folderNameFormatter.format(LocalDateTime.now())
+        this.sessionFolderName = folderNameFormatter.format(LocalDateTime.now()) +
+            if (uniqueSession) "-${UUID.randomUUID()}" else ""
         val path = getDebugOutputPath()
         LogConfig.configure(logFileName = path.absolutePathString() + "/maestro.log", printToConsole = printToConsole)
         logSystemInfo()

@@ -3,6 +3,7 @@ package maestro.drivers
 import CdpClient
 import CdpTarget
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import maestro.Capability
 import maestro.DeviceInfo
@@ -40,6 +41,7 @@ import org.openqa.selenium.interactions.Actions
 import org.openqa.selenium.interactions.PointerInput
 import org.openqa.selenium.interactions.Sequence
 import org.openqa.selenium.remote.RemoteWebDriver
+import org.openqa.selenium.support.ui.WebDriverWait
 import org.slf4j.LoggerFactory
 import java.io.File
 import java.net.URI
@@ -48,6 +50,8 @@ import java.time.Instant
 import java.util.*
 import java.util.logging.Level
 import java.util.logging.Logger
+
+private val jsonMapper = jacksonObjectMapper()
 
 
 private const val SYNTHETIC_COORDINATE_SPACE_OFFSET = 100000
@@ -87,14 +91,19 @@ class CdpWebDriver(
                 ?.let { it as? HasDevTools }
                 ?.devTools
                 ?.createSessionIfThereIsNotOne()
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             // Swallow the exception to avoid crashing the whole process.
             // Some implementations of Selenium do not support DevTools
             // and do not fail gracefully.
         }
 
         if (isStudio) {
-            seleniumDriver?.get("https://maestro.mobile.dev")
+            try {
+                seleniumDriver?.get("https://maestro.mobile.dev")
+            } catch (e: Exception) {
+                runCatching { close() }.exceptionOrNull()?.let { e.addSuppressed(it) }
+                throw e
+            }
         }
     }
 
@@ -138,16 +147,16 @@ class CdpWebDriver(
             }
         )
 
-        val options = driver.capabilities.getCapability("goog:chromeOptions") as Map<String, Any>
-        val debuggerAddress = options["debuggerAddress"] as String
-        val parts = debuggerAddress.split(":")
-
-        cdpClient = CdpClient(
-            host = parts[0],
-            port = parts[1].toInt()
-        )
-
-        return driver
+        try {
+            val options = driver.capabilities.getCapability("goog:chromeOptions") as Map<String, Any>
+            val debuggerAddress = options["debuggerAddress"] as String
+            val parts = debuggerAddress.split(":")
+            cdpClient = CdpClient(host = parts[0], port = parts[1].toInt())
+            return driver
+        } catch (e: Throwable) {
+            runCatching { driver.quit() }.exceptionOrNull()?.let { e.addSuppressed(it) }
+            throw e
+        }
     }
 
     private fun ensureOpen(): org.openqa.selenium.WebDriver {
@@ -190,22 +199,26 @@ class CdpWebDriver(
                 try {
                     val target = currentTarget()
 
-                    cdpClient.evaluate("$maestroWebScript", target)
-
-                    injectedArguments.forEach { (key, value) ->
-                        cdpClient.evaluate("$key = '$value'", target)
+                    val arguments = injectedArguments.entries.joinToString("\n") { (key, value) ->
+                        "$key = ${jsonMapper.writeValueAsString(value.toString())};"
                     }
-
-                    Thread.sleep(100)
-
-                    val resultStr = cdpClient.evaluate(js, target)
+                    val expression = """
+                        (() => {
+                            $maestroWebScript
+                            $arguments
+                            return $js;
+                        })()
+                    """.trimIndent()
+                    val resultStr = cdpClient.evaluate(expression, target)
 
                     // CDP returns an empty value for expressions that evaluate to undefined (e.g.
                     // window.scroll(...)). There is nothing to deserialize in that case.
                     if (resultStr.isBlank()) return@runBlocking null
 
                     // Convert from string to Map<String, Any> if needed
-                    return@runBlocking jacksonObjectMapper().readValue(resultStr, Any::class.java)
+                    return@runBlocking jsonMapper.readValue(resultStr, Any::class.java)
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     // The page can navigate or reload out from under us (e.g. right after
                     // launchApp/clearState), invalidating the CDP target mid-evaluation. Wait
@@ -235,10 +248,15 @@ class CdpWebDriver(
 
         if (point.y >= 0 && point.y.toLong() <= windowHeight) return 0L
 
-        val scrolledPixels =
-            executeJS("(() => {const delta = ${point.y} - Math.floor(window.innerHeight / 2); window.scrollBy({ top: delta, left: 0, behavior: 'smooth' }); return delta})()") as Int
-        sleep(3000L)
-        return scrolledPixels.toLong()
+        val movedResult = executeJS("""
+            (() => {
+                const initialY = window.scrollY;
+                const delta = ${point.y} - Math.floor(window.innerHeight / 2);
+                window.scrollBy({ top: delta, left: 0, behavior: 'instant' });
+                return Math.round(window.scrollY - initialY);
+            })()
+        """.trimIndent())
+        return (movedResult as Number).toLong()
     }
 
     private fun sleep(ms: Long) {
@@ -255,17 +273,18 @@ class CdpWebDriver(
 
     override fun close() {
         injectedArguments = emptyMap()
-
         try {
             seleniumDriver?.quit()
-            webScreenRecorder?.close()
-        } catch (e: Exception) {
-            // Swallow the exception to avoid crashing the whole process
+        } finally {
+            try {
+                webScreenRecorder?.close()
+            } finally {
+                if (::cdpClient.isInitialized) cdpClient.close()
+                seleniumDriver = null
+                lastSeenWindowHandles = setOf()
+                webScreenRecorder = null
+            }
         }
-
-        seleniumDriver = null
-        lastSeenWindowHandles = setOf()
-        webScreenRecorder = null
     }
 
     override fun deviceInfo(): DeviceInfo {
@@ -287,11 +306,8 @@ class CdpWebDriver(
     ) {
         injectedArguments = injectedArguments + launchArguments
 
-        runBlocking {
-            // Navigate the window Selenium holds, so the Selenium-driven commands (inputText,
-            // eraseText) and the CDP-driven ones stay pointed at the same page.
-            cdpClient.openUrl(appId, currentTarget())
-        }
+        // WebDriver navigation waits for document load and keeps Selenium and CDP aligned.
+        ensureOpen().get(appId)
     }
 
     override fun stopApp(appId: String) {
@@ -313,16 +329,8 @@ class CdpWebDriver(
         // retrieve view hierarchy from DOM
         // There are edge cases where executeJS returns null, and we cannot get the hierarchy. In this situation
         // we retry multiple times until throwing an error eventually. (See issue #1936)
-        var contentDesc: Any? = null
-        var retry = 0
-        while (contentDesc == null) {
-            contentDesc = executeJS("window.maestro.getContentDescription()")
-            if (contentDesc == null) {
-                retry++
-            }
-            if (retry == RETRY_FETCHING_CONTENT_DESCRIPTION) {
-                throw IllegalStateException("Could not retrieve hierarchy through maestro.getContentDescription() (tried $retry times")
-            }
+        val contentDesc = WebDriverWait(ensureOpen(), Duration.ofSeconds(30)).until {
+            executeJS("window.maestro.getContentDescription()")
         }
 
         val rawMap = contentDesc as Map<String, Any>
@@ -368,9 +376,10 @@ class CdpWebDriver(
         // Checks whether there are any new window handles available and, if so, switches Selenium driver focus to it
         val driver = ensureOpen()
 
-        if (lastSeenWindowHandles != driver.windowHandles) {
-            val newHandles = driver.windowHandles - lastSeenWindowHandles
-            lastSeenWindowHandles = driver.windowHandles
+        val currentHandles = driver.windowHandles
+        if (lastSeenWindowHandles != currentHandles) {
+            val newHandles = currentHandles - lastSeenWindowHandles
+            lastSeenWindowHandles = currentHandles
 
             if (newHandles.isNotEmpty()) {
                 val newHandle = newHandles.first()
@@ -438,7 +447,7 @@ class CdpWebDriver(
         val actions = Sequence(mouse, 1)
             .addAction(
                 mouse.createPointerMove(
-                    Duration.ofMillis(400),
+                    Duration.ZERO,
                     PointerInput.Origin.viewport(),
                     point.x,
                     point.y - pixelsScrolled.toInt()
@@ -568,10 +577,7 @@ class CdpWebDriver(
                 return@withActiveElement
             }
 
-            for (c in text.toCharArray()) {
-                element.sendKeys("$c")
-                sleep(random(20, 100).toLong())
-            }
+            Actions(ensureOpen()).sendKeys(text).perform()
         }
     }
 
@@ -855,7 +861,6 @@ class CdpWebDriver(
 
     companion object {
         private const val SCREENSHOT_DIFF_THRESHOLD = 0.005
-        private const val RETRY_FETCHING_CONTENT_DESCRIPTION = 10
         private const val JS_EXECUTION_MAX_ATTEMPTS = 5
         private const val JS_EXECUTION_RETRY_DELAY_MS = 200L
 

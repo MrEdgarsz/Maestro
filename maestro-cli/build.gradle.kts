@@ -8,7 +8,6 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.security.MessageDigest
 import java.util.Locale
-import java.util.Properties
 
 @Suppress("DSL_SCOPE_VIOLATION")
 plugins {
@@ -354,11 +353,8 @@ tasks.create("createProperties") {
     dependsOn("processResources")
 
     doLast {
-        File("$buildDir/resources/main/version.properties").writer().use { w ->
-            val p = Properties()
-            p["version"] = CLI_VERSION
-            p.store(w, null)
-        }
+        File("$buildDir/resources/main/version.properties")
+            .writeText("version=$CLI_VERSION\n", Charsets.UTF_8)
     }
 }
 
@@ -381,6 +377,8 @@ tasks.named("classes") {
 
 tasks.named<Zip>("distZip") {
     archiveFileName.set("maestro.zip")
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
 }
 
 tasks.named<Tar>("distTar") {

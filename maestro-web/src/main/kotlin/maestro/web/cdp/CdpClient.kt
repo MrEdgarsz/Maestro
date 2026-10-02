@@ -6,8 +6,7 @@ import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.websocket.*
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -19,6 +18,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import java.util.*
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Descriptor for a CDP target (an open tab/page).
@@ -45,7 +46,7 @@ private const val CDP_RESPONSE_TIMEOUT_MS = 30_000L
 class CdpClient(
     private val host: String = "localhost",
     private val port: Int = 9222
-) {
+) : AutoCloseable {
     private val httpClient = HttpClient(CIO) {
         install(ContentNegotiation) {
             json()
@@ -54,7 +55,14 @@ class CdpClient(
     }
     private val json = Json { ignoreUnknownKeys = true }
     private val idCounter = AtomicInteger(1)
-    private val evalMutex = Mutex()
+    private val closed = AtomicBoolean(false)
+    private val activeSessions = ConcurrentHashMap.newKeySet<DefaultClientWebSocketSession>()
+
+    override fun close() {
+        if (!closed.compareAndSet(false, true)) return
+        activeSessions.toList().forEach { it.cancel() }
+        httpClient.close()
+    }
 
     /**
      * Fetches the list of open CDP targets (tabs/pages).
@@ -80,10 +88,10 @@ class CdpClient(
         // as passing objects between JS and outside world would require many round-trips to query the values
         // from the browser.
         val wrapped = """
-            JSON.stringify((() => {
-                try { return $expression }
-                catch(e) { return { __cdpError: e.toString() } }
-            })())
+            (async () => {
+                try { return JSON.stringify(await ($expression)) ?? "null"; }
+                catch(e) { return JSON.stringify({ __cdpError: e.toString() }); }
+            })()
         """.trimIndent()
 
         val exprJson = Json.encodeToString(JsonPrimitive(wrapped))
@@ -96,36 +104,19 @@ class CdpClient(
             }
         """.trimIndent()
 
-        return evalMutex.withLock {
-            httpClient.webSocketSession {
-                url(wsUrl)
-            }.use { session ->
-                session.send(Frame.Text(payload))
-
-                val text = session.waitForMessage(messageId)
-
-                // Parse JSON
-                val root = json.parseToJsonElement(text).jsonObject
-                val resultObj = root["result"]?.jsonObject
-                    ?.get("result")?.jsonObject
-                    ?: error("Invalid CDP response: $text")
-
-                val raw: String = resultObj["value"]?.jsonPrimitive?.content
-                    ?: ""
-
-                if (raw.isEmpty()) {
-                    return@use ""
-                }
-
-                // Check for JS error
-                val parsed = json.parseToJsonElement(raw)
-                if (parsed is JsonObject && parsed.jsonObject.containsKey("__cdpError")) {
-                    val err = parsed.jsonObject["__cdpError"]?.jsonPrimitive?.content
-                    error("JS error: $err")
-                }
-                return@use raw
-            }
+        val text = sendCommand(wsUrl, messageId, payload)
+        val root = json.parseToJsonElement(text).jsonObject
+        val resultObj = root["result"]?.jsonObject
+            ?.get("result")?.jsonObject
+            ?: error("Invalid CDP response: $text")
+        val raw: String = resultObj["value"]?.jsonPrimitive?.content ?: ""
+        if (raw.isEmpty()) return ""
+        val parsed = json.parseToJsonElement(raw)
+        if (parsed is JsonObject && parsed.jsonObject.containsKey("__cdpError")) {
+            val err = parsed.jsonObject["__cdpError"]?.jsonPrimitive?.content
+            error("JS error: $err")
         }
+        return raw
     }
 
     suspend fun captureScreenshot(target: CdpTarget): ByteArray {
@@ -146,17 +137,10 @@ class CdpClient(
         // Open WS, send & await
         val wsUrl = target.webSocketDebuggerUrl ?: error("Target ${target.id} has no WebSocket debugger URL")
 
-        return httpClient.webSocketSession { url(wsUrl) }
-            .use { session ->
-                session.send(Frame.Text(payload))
-
-                val text = session.waitForMessage(messageId)
-
-                val data = Json.parseToJsonElement(text)
-                    .jsonObject["result"]!!.jsonObject["data"]!!.jsonPrimitive.content
-
-                return@use Base64.getDecoder().decode(data)
-            }
+        val text = sendCommand(wsUrl, messageId, payload)
+        val data = Json.parseToJsonElement(text)
+            .jsonObject["result"]!!.jsonObject["data"]!!.jsonPrimitive.content
+        return Base64.getDecoder().decode(data)
     }
 
     suspend fun openUrl(url: String, target: CdpTarget) {
@@ -172,12 +156,8 @@ class CdpClient(
             }
         """.trimIndent()
 
-        httpClient.webSocketSession { url(target.webSocketDebuggerUrl ?: error("Target ${target.id} has no WebSocket debugger URL")) }
-            .use { session ->
-                session.send(Frame.Text(payload))
-
-                session.waitForMessage(messageId)
-            }
+        val wsUrl = target.webSocketDebuggerUrl ?: error("Target ${target.id} has no WebSocket debugger URL")
+        sendCommand(wsUrl, messageId, payload)
     }
 
     suspend fun clearDataForOrigin(origin: String, storageTypes: String, target: CdpTarget) {
@@ -195,17 +175,30 @@ class CdpClient(
             }
         """.trimIndent()
 
-        evalMutex.withLock {
-            httpClient.webSocketSession { url(target.webSocketDebuggerUrl ?: error("Target ${target.id} has no WebSocket debugger URL")) }
-                .use { session ->
-                    session.send(Frame.Text(payload))
+        val wsUrl = target.webSocketDebuggerUrl ?: error("Target ${target.id} has no WebSocket debugger URL")
+        val text = sendCommand(wsUrl, messageId, payload)
+        val root = json.parseToJsonElement(text).jsonObject
+        if (root["error"] != null) {
+            error("CDP error: ${root["error"]}")
+        }
+    }
 
-                    val text = session.waitForMessage(messageId)
-                    val root = json.parseToJsonElement(text).jsonObject
-                    if (root["error"] != null) {
-                        error("CDP error: ${root["error"]}")
-                    }
-                }
+    /** Each command owns a WebSocket that closes on success, failure, or cancellation. */
+    private suspend fun sendCommand(wsUrl: String, messageId: Int, payload: String): String {
+        check(!closed.get()) { "CDP client is closed" }
+        val session = httpClient.webSocketSession { url(wsUrl) }
+        activeSessions.add(session)
+        if (closed.get()) {
+            activeSessions.remove(session)
+            session.cancel()
+            error("CDP client is closed")
+        }
+        return try {
+            session.send(Frame.Text(payload))
+            session.waitForMessage(messageId)
+        } finally {
+            activeSessions.remove(session)
+            session.cancel()
         }
     }
 
@@ -214,7 +207,10 @@ class CdpClient(
             for (frame in incoming) {
                 if (frame is Frame.Text) {
                     val text = frame.readText()
-                    if (text.contains("\"id\":$messageId")) {
+                    val responseId = runCatching {
+                        json.parseToJsonElement(text).jsonObject["id"]?.jsonPrimitive?.content?.toInt()
+                    }.getOrNull()
+                    if (responseId == messageId) {
                         return@withTimeoutOrNull text
                     }
                 }
@@ -223,14 +219,6 @@ class CdpClient(
         }
 
         return text ?: error("No message with id $messageId received within ${CDP_RESPONSE_TIMEOUT_MS}ms")
-    }
-
-    private suspend fun <R> DefaultClientWebSocketSession.use(block: suspend (DefaultClientWebSocketSession) -> R): R {
-        return try {
-            block(this)
-        } finally {
-            close()
-        }
     }
 
 }
