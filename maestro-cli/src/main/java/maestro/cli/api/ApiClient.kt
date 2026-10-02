@@ -1031,6 +1031,7 @@ data class CliVersion(
     val major: Int,
     val minor: Int,
     val patch: Int,
+    val qualifier: String? = null,
 ) : Comparable<CliVersion> {
 
     override fun compareTo(other: CliVersion): Int {
@@ -1038,20 +1039,24 @@ data class CliVersion(
     }
 
     override fun toString(): String {
-        return "$major.$minor.$patch"
+        return "$major.$minor.$patch${qualifier.orEmpty()}"
     }
 
     companion object {
 
         private val COMPARATOR = compareBy<CliVersion>({ it.major }, { it.minor }, { it.patch })
 
+        private val VERSION_PATTERN = Regex(
+            "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+        )
+
         fun parse(versionString: String): CliVersion? {
-            val parts = versionString.split('.')
-            if (parts.size != 3) return null
-            val major = parts[0].toIntOrNull() ?: return null
-            val minor = parts[1].toIntOrNull() ?: return null
-            val patch = parts[2].toIntOrNull() ?: return null
-            return CliVersion(major, minor, patch)
+            val match = VERSION_PATTERN.matchEntire(versionString) ?: return null
+            val major = match.groupValues[1].toIntOrNull() ?: return null
+            val minor = match.groupValues[2].toIntOrNull() ?: return null
+            val patch = match.groupValues[3].toIntOrNull() ?: return null
+            val qualifier = match.groupValues[4].ifEmpty { null }
+            return CliVersion(major, minor, patch, qualifier)
         }
     }
 }

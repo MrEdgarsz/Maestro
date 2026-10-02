@@ -25,6 +25,18 @@ class CdpWebDriverTest {
     }
 
     @Test
+    fun `selectTarget matches prefixed Selenium handle among multiple pages`() {
+        val targets = listOf(
+            target("other-tab", "page", "https://example.com/"),
+            target("under-test", "page", "https://www.saucedemo.com/"),
+        )
+
+        val selected = makeDriver().selectTarget(targets, windowHandle = "CDwindow-under-test")
+
+        assertThat(selected?.id).isEqualTo("under-test")
+    }
+
+    @Test
     fun `selectTarget skips browser and extension targets when the handle is unknown`() {
         // Chrome 151 lists its omnibox WebUI first, and a profile with extensions adds more ahead
         // of the page. Evaluating against any of them reads the wrong DOM.

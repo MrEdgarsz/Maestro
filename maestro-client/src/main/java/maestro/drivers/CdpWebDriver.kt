@@ -176,7 +176,8 @@ class CdpWebDriver(
      * authoritative answer. The type and scheme filters only cover the case where it cannot be read.
      */
     internal fun selectTarget(targets: List<CdpTarget>, windowHandle: String?): CdpTarget? {
-        return targets.firstOrNull { it.id == windowHandle }
+        val targetId = windowHandle?.removePrefix(SELENIUM_WINDOW_HANDLE_PREFIX)
+        return targets.firstOrNull { it.id == targetId }
             ?: targets.firstOrNull {
                 it.type == PAGE_TARGET_TYPE && BROWSER_INTERNAL_URL_SCHEMES.none(it.url::startsWith)
             }
@@ -867,6 +868,7 @@ class CdpWebDriver(
         // The only /json target type that is a real tab; everything else is a browser surface,
         // an extension worker or an iframe.
         private const val PAGE_TARGET_TYPE = "page"
+        private const val SELENIUM_WINDOW_HANDLE_PREFIX = "CDwindow-"
 
         private val BROWSER_INTERNAL_URL_SCHEMES =
             listOf("chrome://", "chrome-untrusted://", "chrome-extension://", "devtools://")

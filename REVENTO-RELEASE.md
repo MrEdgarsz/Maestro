@@ -31,12 +31,21 @@ The batch protocol and headless regression are documented in
 gate run with:
 
 ```sh
+./gradlew :maestro-cli:test --tests maestro.cli.api.CliVersionTest
+./gradlew :maestro-client:test --tests maestro.drivers.CdpWebDriverTest
 ./gradlew :maestro-cli:test --tests maestro.cli.command.TestBatchCommandTest --tests maestro.cli.session.IsolatedWebSessionTest
 ./gradlew :maestro-web:test --tests CdpClientTest
 ./gradlew :maestro-client:test --tests maestro.drivers.FlutterWebSemanticsIdentifierTest
 ./gradlew :maestro-test:test
-MAESTRO_WEB_TESTS=true ./gradlew :maestro-client:test --tests maestro.drivers.CdpWebDriverBrowserTest
+SE_BROWSER_PATH=/path/to/chrome-for-testing-147 MAESTRO_WEB_TESTS=true ./gradlew :maestro-client:test --tests maestro.drivers.CdpWebDriverBrowserTest
 DIST_DIR=$(mktemp -d)
 unzip -q maestro-cli/build/distributions/maestro.zip -d "$DIST_DIR"
 python3 maestro-cli/src/test/scripts/test_batch.py "$DIST_DIR/maestro/bin/maestro" "$DIST_DIR/proof"
 ```
+
+The browser gate must use Chrome for Testing `147.0.7727.117`, from the pin
+in `/Users/edgar/dev/topo-system/scripts/maestro/lib/browser.sh`. Chrome 154
+passed the previous run but does not validate this release's supported browser
+version. Set `SE_BROWSER_PATH` to the pinned executable (and, when needed,
+`SE_DRIVER_PATH` to its matching ChromeDriver) so the browser test does not use
+an ambient browser installation.
